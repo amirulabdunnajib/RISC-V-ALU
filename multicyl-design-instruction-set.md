@@ -2,7 +2,7 @@
 
 ## Scope
 
-This note lists the **ALU work required by the six instruction examples** in the planned multicycle RISC-V processor. **The ALU is not used for PC operations** in this design: PC increment and branch-target calculation belong to separate hardware. The ALU is combinational; the controller selects its inputs and operation for the relevant cycle.
+This note lists **what the shared ALU computes for six instruction examples** in the planned multicycle RISC-V processor. The ALU is combinational: the control unit selects its two inputs and operation during the appropriate cycle. **A separate incrementer computes `PC + 4`; the ALU does not do that job.** The ALU **does** compute the branch target for `BEQ` using `PC + branch immediate`.
 
 ## ALU operations by instruction
 
@@ -11,32 +11,52 @@ This note lists the **ALU work required by the six instruction examples** in the
 | `ADD` | `add a3, a1, a2` | `rs1` | `rs2` | ADD | `rs1 + rs2` |
 | `SUB` | `sub a3, a1, a2` | `rs1` | `rs2` | SUB | `rs1 - rs2` |
 | `ADDI` | `addi a3, a1, 0x15` | `rs1` | Immediate | ADD | `rs1 + imm` |
-| `LW` | `lw a1, 4(a4)` | `rs1` (base address) | Immediate | ADD | Effective memory address: `rs1 + imm` |
-| `SW` | `sw a1, 4(a4)` | `rs1` (base address) | Immediate | ADD | Effective memory address: `rs1 + imm` |
-| `BEQ` | `beq a1, a2, target` | — | — | **None for this ALU** | Equality check uses a separate branch comparator; branch target uses separate PC/branch hardware. |
+| `LW` | `lw a1, 4(a4)` | `rs1` (base address) | Immediate | ADD | Effective address: `rs1 + imm` |
+| `SW` | `sw a1, 4(a4)` | `rs1` (base address) | Immediate | ADD | Effective address: `rs1 + imm` |
+| `BEQ` | `beq a1, a2, target` | PC | Branch immediate | ADD | Branch target: `PC + branch_imm` |
 
-> **Syntax:** RISC-V uses `addi rd, rs1, imm`, not `add rd, rs1, imm`. For stores, `sw rs2, imm(rs1)` uses `rs1` as the address base and `rs2` as the data to store.
+> **Syntax:** RISC-V uses `addi rd, rs1, imm`, not `add rd, rs1, imm`. For `sw rs2, imm(rs1)`, `rs1` supplies the base address and `rs2` supplies the data to store.
 
-## ALU control for the arithmetic and address-calculation cycle
+## ALU control during the relevant cycle
 
-| Instruction | `i_A_Sel` | `i_B_sel` | `i_ALU_OP` |
+The selector meanings in these notes are:
+
+- `i_A_Sel = 0`: `rs1`; `i_A_Sel = 1`: PC.
+- `i_B_Sel = 0`: `rs2`; `i_B_Sel = 1`: immediate.
+- ALU operation `3'b000`: ADD; `3'b001`: SUB (as encoded in the earlier design notes).
+
+| Instruction | `i_A_Sel` | `i_B_Sel` | ALU operation selection |
 |---|---:|---:|---|
-| `ADD` | `0` (`rs1`) | `0` (`rs2`) | `3'b000` ADD |
-| `SUB` | `0` (`rs1`) | `0` (`rs2`) | `3'b001` SUB |
-| `ADDI` | `0` (`rs1`) | `1` (immediate) | `3'b000` ADD |
-| `LW` | `0` (`rs1`) | `1` (immediate) | `3'b000` ADD |
-| `SW` | `0` (`rs1`) | `1` (immediate) | `3'b000` ADD |
-| `BEQ` | — | — | — |
+| `ADD` | `0` (rs1) | `0` (rs2) | `3'b000` ADD |
+| `SUB` | `0` (rs1) | `0` (rs2) | `3'b001` SUB |
+| `ADDI` | `0` (rs1) | `1` (immediate) | `3'b000` ADD |
+| `LW` | `0` (rs1) | `1` (immediate) | `3'b000` ADD |
+| `SW` | `0` (rs1) | `1` (immediate) | `3'b000` ADD |
+| `BEQ` | `1` (PC) | `1` (branch immediate) | `3'b000` ADD |
 
-## Multicycle rule
+*Match the exact signal capitalization and operation constant names to your RTL when wiring the control unit.*
 
-- **One ALU operation is selected at a time.** For `ADD`, `SUB`, and `ADDI`, the ALU computes the arithmetic result during the designated execute cycle.
-- For `LW` and `SW`, the ALU computes the effective address during the address-calculation cycle. The memory access takes place separately; the ALU does not read or write memory.
-- `BEQ` equality comparison and target calculation use separate hardware in this planned design; they do not require an ALU operation.
-- PC update (`PC + 4`) also uses separate hardware, **not this ALU**.
+## Multicycle rule: what happens in one cycle?
+
+- **Only one selected ALU computation is used at a time.** The ALU's inputs and operation are controlled by the FSM for the current cycle.
+- `ADD`, `SUB`, `ADDI`: compute the arithmetic result in the designated execute cycle. Register write-back is a separate processor action.
+- `LW`, `SW`: compute `rs1 + immediate` to produce an effective memory address in the address-calculation cycle. The LSU/memory handles the subsequent load or store; the ALU does not access memory itself.
+- `BEQ`: compute `PC + branch immediate` to produce the branch target. A **separate branch comparator** checks `rs1 == rs2`; PC-selection logic uses the target only if the branch is taken. The precise FSM cycle in which comparison and target calculation occur depends on the implementation.
+- **Sequential PC increment (`PC + 4`) uses a separate incrementer, not the ALU.**
+
+## BEQ example
+
+If the branch instruction's PC is `0x00400000` and its decoded branch immediate is `0x24`:
+
+```text
+ALU input A = PC                 = 0x00400000
+ALU input B = branch immediate   = 0x00000024
+ALU operation = ADD
+ALU output = branch target       = 0x00400024
+```
+
+The comparator independently checks whether the two source registers are equal. If equal, the PC-update logic selects `0x00400024`; otherwise, execution follows the sequential PC path.
 
 ## RTL alignment note
 
-The supplied ALU RTL currently includes a mux that can select `I_pc_output` when `i_A_Sel = 1`. **That is an existing RTL capability, not a requirement of the intended processor architecture described here.** To keep the ALU independent of PC operations, drive `i_A_Sel = 0` for the listed ALU instructions, and implement PC increment/branch-target generation separately. Removing the unused PC input/mux is an optional RTL cleanup after checking the top-level connections.
-
-The RTL ALU also implements AND, OR, and XOR, but those instructions are outside the six examples documented here. This table specifies the ALU's role, not proof that the complete CPU already implements all six instructions.
+The ALU's PC input/multiplexer is **required for `BEQ` target calculation** in this architecture. Do not remove it. The separate `PC + 4` incrementer remains outside the ALU. The ALU may implement other operations (such as AND, OR and XOR), but they are outside the six instruction examples covered here. This note documents ALU requirements, not proof that the entire CPU already executes every instruction.
